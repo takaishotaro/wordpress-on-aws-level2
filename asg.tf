@@ -24,46 +24,77 @@ module "private_sg" {
   ]
 }
 
-# data "aws_ami" "wordpress_ami" {
-#    filter {
-#     name   = "image_id"
-#     values = ["ami-01e80333bb3b09995"]
-#   }
-# }
+data "aws_ami" "amazonlinux" {
+  most_recent = true
+  owners      = ["amazon"]
 
-module "autoscalling" {
-  source = "terraform-aws-modules/autoscaling/aws"
-
-  name                      = var.env_code
-  min_size                  = 2
-  max_size                  = 5
-  desired_capacity          = 2
-  health_check_grace_period = 400
-  health_check_type         = "EC2"
-  vpc_zone_identifier       = data.terraform_remote_state.level1.outputs.private_subnet_id
-  target_group_arns         = module.alb.target_group_arns
-  force_delete              = true
-
-  launch_template_name        = var.env_code
-  launch_template             = "Launch temp example"
-  update_default_version      = true
-  launch_template_description = "$Latest"
-
-  image_id        = "ami-058c26a84a10d2278"
-  instance_type   = "t2.micro"
-  key_name        = "main"
-  security_groups = [module.private_sg.security_group_id]
-  # user_data       = filebase64("user-data.sh")
-
-  create_iam_instance_profile = true
-  iam_role_name               = var.env_code
-  iam_role_path               = "/ec2/"
-  iam_role_description        = "iam role for ssm"
-  iam_role_tags = {
-    CustomIamRole = "No"
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-2.0.*-x86_64-gp2"]
   }
-  iam_role_policies = {
-    AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  filter {
+    name   = "root-device-type"
+    values = ["ebs"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
   }
 }
 
+resource "aws_iam_role" "main" {
+  name                = var.env_code
+  managed_policy_arns = ["arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM"]
+  assume_role_policy  = <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement":[
+        {
+            
+            "Effect": "Allow",
+            "Action": "sts:AssumeRole",
+            "Principal": {
+                "Service": "ec2.amazonaws.com"
+            },
+            "Sid": ""
+        }
+    ]
+}
+EOF
+}
+
+resource "aws_iam_instance_profile" "main" {
+  name = var.env_code
+  role = aws_iam_role.main.name
+}
+
+resource "aws_launch_configuration" "web_config" {
+  image_id             = data.aws_ami.amazonlinux.id
+  instance_type        = "t2.micro"
+  iam_instance_profile = aws_iam_instance_profile.main.name
+  security_groups      = [module.private_sg.security_group_id]
+
+  user_data = templatefile("${path.module}/user-data.tpl",
+    { db_username  = var.db_username,
+      db_password  = var.rds_password,
+      db_name      = var.db_name,
+      rds_endpoint = var.rds_endpoint,
+      wp_username  = var.wp_username,
+      wp_email     = var.wp_email,
+      wp_password  = var.wp_password })
+}
+
+resource "aws_autoscaling_group" "app-asg" {
+  launch_configuration = aws_launch_configuration.web_config.id
+  vpc_zone_identifier  = data.terraform_remote_state.level1.outputs.private_subnet_id
+  target_group_arns    = module.alb.target_group_arns
+
+  max_size = 2
+  min_size = 2
+
+  tag {
+    key                 = "Name"
+    value               = "${var.env_code}-asg"
+    propagate_at_launch = true
+  }
+}

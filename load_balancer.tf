@@ -61,7 +61,7 @@ module "alb" {
       health_check = {
         enabled             = true
         interval            = 30
-        path                = "/health.html"
+        path                = "/readme.html"
         port                = "traffic-port"
         healthy_threshold   = 5
         unhealthy_threshold = 2
